@@ -62,22 +62,10 @@ async function scrapePage(url) {
     const md = res.data?.data?.markdown || '';
 
     console.log(`Scrape OK: ${url} | dužina markdown-a: ${md.length}`);
-
-    // 👇 OVO JE KLJUČNO
     console.log('--- MARKDOWN PREVIEW START ---');
     console.log(md.slice(0, 4000));
     console.log('--- MARKDOWN PREVIEW END ---');
 
-    return md;
-
-  } catch (e) {
-    console.error(`Firecrawl greška za ${url}:`, e.response?.data || e.message);
-    return '';
-  }
-}
-
-    const md = res.data?.data?.markdown || '';
-    console.log(`Scrape OK: ${url} | dužina markdown-a: ${md.length}`);
     return md;
   } catch (e) {
     console.error(`Firecrawl greška za ${url}:`, e.response?.data || e.message);
@@ -122,6 +110,7 @@ function parseAuctions(md) {
     const line = rawLine.trim();
 
     const match = line.match(/(?<!!)\[([^\]]+)\]\(([^)]+)\)/);
+
     if (match) {
       const title = match[1].trim();
       const auctionUrl = normalizeAuctionUrl(match[2]);
@@ -353,5 +342,9 @@ async function run() {
 }
 
 ensureDir();
+
+cron.schedule('0 8,14,20 * * *', run, {
+  timezone: 'Europe/Belgrade'
+});
 
 run();
