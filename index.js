@@ -6,6 +6,19 @@ const config = require('./config');
 
 const DB_FILE = path.join(__dirname, 'auctions.json');
 
+// --- Validation helpers ---
+function validateConfig() {
+  const missing = [];
+
+  if (!config.FIRECRAWL_API_KEY) missing.push('FIRECRAWL_API_KEY');
+  if (!config.TELEGRAM_TOKEN) missing.push('TELEGRAM_TOKEN');
+  if (!config.TELEGRAM_CHAT_ID) missing.push('TELEGRAM_CHAT_ID');
+
+  if (missing.length > 0) {
+    throw new Error(`Nedostaju environment varijable: ${missing.join(', ')}`);
+  }
+}
+
 // --- Database helpers ---
 function loadDB() {
   if (!fs.existsSync(DB_FILE)) return {};
@@ -27,12 +40,11 @@ async function sendTelegram(message) {
     await axios.post(url, {
       chat_id: config.TELEGRAM_CHAT_ID,
       text: message,
-      parse_mode: 'HTML',
       disable_web_page_preview: false,
     });
     console.log('Telegram poruka poslata.');
   } catch (err) {
-    console.error('Greška pri slanju Telegram poruke:', err.message);
+    console.error('Greška pri slanju Telegram poruke:', err.response?.data || err.message);
   }
 }
 
@@ -58,7 +70,7 @@ async function scrapeAuctions() {
     const markdown = response.data?.data?.markdown || '';
     return parseAuctions(markdown);
   } catch (err) {
-    console.error('Greška pri čitanju sajta:', err.message);
+    console.error('Greška pri čitanju sajta:', err.response?.data || err.message);
     return [];
   }
 }
@@ -125,9 +137,64 @@ function parseNorwegianDate(str) {
   return null;
 }
 
+// --- Message helpers ---
+function buildMessages(totalActive, newItems, soonItems) {
+  const messages = [];
+  let current = `🔍 Pregled aukcija - ${new Date().toLocaleString('sr-Latn')}\nUkupno aktivnih: ${totalActive}\n`;
+
+  if (newItems.length > 0) {
+    current += `\n🆕 Novi oglasi (${newItems.length}):\n`;
+    for (const a of newItems) {
+      let block = `• ${a.title}`;
+      if (a.currentBid) block += ` - ${a.currentBid}`;
+      if (a.endTime) block += `\n  Ističe: ${a.endTime}`;
+      block += `\n  ${a.url}\n`;
+
+      if ((current + '\n' + block).length > 3500) {
+        messages.push(current);
+        current = `🆕 Novi oglasi - nastavak\n`;
+      }
+
+      current += `${block}\n`;
+    }
+  }
+
+  if (soonItems.length > 0) {
+    if (current.trim().length > 0 && !current.endsWith('\n\n')) {
+      current += '\n';
+    }
+    current += `⚠️ Uskoro ističu:\n`;
+
+    for (const a of soonItems) {
+      let block = `• ${a.title}`;
+      if (a.currentBid) block += ` - ${a.currentBid}`;
+      block += `\n  Još ~${a.hoursLeft}h (${a.endTime})`;
+      block += `\n  ${a.url}\n`;
+
+      if ((current + '\n' + block).length > 3500) {
+        messages.push(current);
+        current = `⚠️ Uskoro ističu - nastavak\n`;
+      }
+
+      current += `${block}\n`;
+    }
+  }
+
+  if (newItems.length === 0 && soonItems.length === 0) {
+    current += `\nNema novih oglasa ni skorih isteka.`;
+  }
+
+  if (current.trim()) {
+    messages.push(current);
+  }
+
+  return messages;
+}
+
 // --- Main check function ---
 async function checkAuctions() {
   const db = loadDB();
+  const hadExistingData = Object.keys(db).length > 0;
   const auctions = await scrapeAuctions();
 
   if (auctions.length === 0) {
@@ -140,26 +207,27 @@ async function checkAuctions() {
   const soonItems = [];
 
   for (const auction of auctions) {
-    const isNew = !db[auction.id];
+    const existing = db[auction.id];
+    const isNew = !existing;
 
     // Save/update in DB
     db[auction.id] = {
       ...auction,
-      firstSeen: db[auction.id]?.firstSeen || now.toISOString(),
+      firstSeen: existing?.firstSeen || now.toISOString(),
       lastSeen: now.toISOString(),
-      notifiedNew: db[auction.id]?.notifiedNew || false,
-      notifiedSoon: db[auction.id]?.notifiedSoon || false,
+      notifiedNew: existing?.notifiedNew || false,
+      notifiedSoon: existing?.notifiedSoon || false,
     };
 
     // New auction notification
-    if (isNew && !db[auction.id].notifiedNew) {
+    if (hadExistingData && isNew && !db[auction.id].notifiedNew) {
       newItems.push(auction);
       db[auction.id].notifiedNew = true;
     }
 
     // 2 hours before end notification
     const endDate = parseNorwegianDate(auction.endTime);
-    if (endDate) {
+    if (hadExistingData && endDate) {
       const hoursLeft = (endDate - now) / (1000 * 60 * 60);
       if (hoursLeft > 0 && hoursLeft <= config.NOTIFY_HOURS_BEFORE && !db[auction.id].notifiedSoon) {
         soonItems.push({ ...auction, hoursLeft: hoursLeft.toFixed(1) });
@@ -170,44 +238,28 @@ async function checkAuctions() {
 
   saveDB(db);
 
-  // Send summary
-  const totalActive = auctions.length;
-  let summaryMsg = `🔍 <b>Pregled aukcija</b> — ${new Date().toLocaleString('sr-Latn')}\n`;
-  summaryMsg += `Ukupno aktivnih: <b>${totalActive}</b>\n`;
-
-  if (newItems.length > 0) {
-    summaryMsg += `\n🆕 <b>Novi oglasi (${newItems.length}):</b>\n`;
-    for (const a of newItems) {
-      summaryMsg += `• <a href="${a.url}">${a.title}</a>`;
-      if (a.currentBid) summaryMsg += ` — ${a.currentBid}`;
-      if (a.endTime) summaryMsg += `\n  ⏰ Ističe: ${a.endTime}`;
-      summaryMsg += '\n';
-    }
+  // First run - initialize DB without spamming Telegram
+  if (!hadExistingData) {
+    console.log('Prvi run - baza inicijalizovana bez slanja Telegram poruka.');
+    return;
   }
 
-  if (soonItems.length > 0) {
-    summaryMsg += `\n⚠️ <b>Uskoro ističu:</b>\n`;
-    for (const a of soonItems) {
-      summaryMsg += `• <a href="${a.url}">${a.title}</a>`;
-      if (a.currentBid) summaryMsg += ` — ${a.currentBid}`;
-      summaryMsg += `\n  ⏰ Još ~${a.hoursLeft}h (${a.endTime})\n`;
-    }
-  }
+  const messages = buildMessages(auctions.length, newItems, soonItems);
 
-  if (newItems.length === 0 && soonItems.length === 0) {
-    summaryMsg += `\nNema novih oglasa ni skorih isteka.`;
+  for (const message of messages) {
+    await sendTelegram(message);
   }
-
-  await sendTelegram(summaryMsg);
 }
 
 // --- Scheduler ---
+validateConfig();
+
 console.log('Tesla aukcija monitor pokrenut.');
 console.log(`Pretraga: ${config.SEARCH_URL}`);
 console.log('Raspored: 08:00, 14:00, 20:00 (po Beogradu)');
 
-// Run at 08:00, 14:00, 20:00 Belgrade time (UTC+1/+2)
-cron.schedule('0 7,13,19 * * *', checkAuctions, { timezone: 'Europe/Belgrade' });
+// Run at 08:00, 14:00, 20:00 Belgrade time
+cron.schedule('0 8,14,20 * * *', checkAuctions, { timezone: 'Europe/Belgrade' });
 
 // Also run immediately on startup
 checkAuctions();
