@@ -7,7 +7,6 @@ const config = require('./config');
 const DB_FILE = path.join(config.DATA_DIR, 'auctions.json');
 const SITE_ORIGIN = 'https://www.auksjonen.no';
 const MAX_AUCTIONS_PER_MESSAGE = 6;
-const MAX_SEARCH_PAGES = 5;
 
 function ensureDir() {
   if (!fs.existsSync(config.DATA_DIR)) {
@@ -60,12 +59,7 @@ async function scrapePage(url) {
     );
 
     const md = res.data?.data?.markdown || '';
-
     console.log(`Scrape OK: ${url} | dužina markdown-a: ${md.length}`);
-    console.log('--- MARKDOWN PREVIEW START ---');
-    console.log(md.slice(0, 4000));
-    console.log('--- MARKDOWN PREVIEW END ---');
-
     return md;
   } catch (e) {
     console.error(`Firecrawl greška za ${url}:`, e.response?.data || e.message);
@@ -73,162 +67,130 @@ async function scrapePage(url) {
   }
 }
 
-function normalizeUrl(url) {
+function normalizeAuctionUrl(url) {
   if (!url) return null;
 
   const trimmed = url.trim();
 
-  if (trimmed.startsWith('http://')) return null;
-  if (trimmed.startsWith(SITE_ORIGIN)) return trimmed;
-  if (trimmed.startsWith('/')) return `${SITE_ORIGIN}${trimmed}`;
+  if (trimmed.startsWith('/auksjon/')) {
+    return `${SITE_ORIGIN}${trimmed}`;
+  }
+
+  if (trimmed.startsWith(`${SITE_ORIGIN}/auksjon/`)) {
+    return trimmed;
+  }
 
   return null;
 }
 
-function normalizeAuctionUrl(url) {
-  const normalized = normalizeUrl(url);
-  if (!normalized) return null;
-  if (!normalized.includes('/auksjon/')) return null;
-  if (normalized.includes('/api/')) return null;
-  if (normalized.includes('/registrer')) return null;
-  return normalized;
+function parseRemainingText(block) {
+  const m = block.match(/((?:\d+\s*d\s*)?(?:\d+\s*t\s*)?(?:\d+\s*min\s*)?(?:\d+\s*sek\s*)?)\s*Gjenstår/i);
+  if (!m) return null;
+
+  return m[1]
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function normalizeSearchUrl(url) {
-  const normalized = normalizeUrl(url);
-  if (!normalized) return null;
-  if (!normalized.includes('/auksjoner/alle')) return null;
-  return normalized;
+function parseRemainingToDate(remainingText, now = new Date()) {
+  if (!remainingText) return null;
+
+  const days = Number((remainingText.match(/(\d+)\s*d/i) || [])[1] || 0);
+  const hours = Number((remainingText.match(/(\d+)\s*t/i) || [])[1] || 0);
+  const mins = Number((remainingText.match(/(\d+)\s*min/i) || [])[1] || 0);
+  const secs = Number((remainingText.match(/(\d+)\s*sek/i) || [])[1] || 0);
+
+  const endDate = new Date(now.getTime());
+  endDate.setDate(endDate.getDate() + days);
+  endDate.setHours(endDate.getHours() + hours);
+  endDate.setMinutes(endDate.getMinutes() + mins);
+  endDate.setSeconds(endDate.getSeconds() + secs);
+
+  return endDate;
+}
+
+function formatDateTime(date) {
+  if (!date) return 'N/A';
+
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+
+  return `${dd}.${mm}.${yyyy} ${hh}:${mi}`;
+}
+
+function extractPrice(block) {
+  if (/Ingen bud/i.test(block)) {
+    return 'Ingen bud';
+  }
+
+  const priceMatches = [...block.matchAll(/(\d[\d\s.]*)\s*,-\s*(?:Høyeste bud|Bud)/gi)];
+  if (!priceMatches.length) return null;
+
+  const raw = priceMatches[0][1]
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return `${raw},-`;
 }
 
 function parseAuctions(md) {
-  const lines = md.split('\n');
+  const normalized = md.replace(/\r/g, '');
+
+  const blockRegex = /-\s*\[\!\[[\s\S]*?\]\((https:\/\/www\.auksjonen\.no\/auksjon\/[^\)]+)\)/g;
+  const blocks = [...normalized.matchAll(blockRegex)];
+
   const items = [];
-  let cur = null;
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-
-    const match = line.match(/(?<!!)\[([^\]]+)\]\(([^)]+)\)/);
-
-    if (match) {
-      const title = match[1].trim();
-      const auctionUrl = normalizeAuctionUrl(match[2]);
-
-      if (auctionUrl) {
-        if (cur) items.push(cur);
-
-        cur = {
-          id: auctionUrl.split('/').pop().split('?')[0],
-          title,
-          url: auctionUrl,
-          endTime: null,
-          currentBid: null
-        };
-
-        continue;
-      }
-    }
-
-    if (!cur) continue;
-
-    const timePatterns = [
-      /avsluttes[:\s]+([^\n]+)/i,
-      /slutter[:\s]+([^\n]+)/i,
-      /tid igjen[:\s]+([^\n]+)/i,
-      /(\d{1,2}\.\d{1,2}\.\d{4}[^\n]*\d{2}:\d{2})/
-    ];
-
-    for (const pat of timePatterns) {
-      const tm = line.match(pat);
-      if (tm && !cur.endTime) {
-        cur.endTime = tm[1].trim();
-      }
-    }
-
-    const bidMatch = line.match(/(\d[\d\s,.]+)\s*(kr|nok)/i);
-    if (bidMatch && !cur.currentBid) {
-      cur.currentBid = bidMatch[0].trim();
-    }
-  }
-
-  if (cur) items.push(cur);
-
-  const deduped = [];
   const seen = new Set();
 
-  for (const item of items) {
-    if (!item.id || seen.has(item.id)) continue;
-    seen.add(item.id);
-    deduped.push(item);
-  }
+  for (const match of blocks) {
+    const block = match[0];
+    const rawUrl = match[1];
+    const url = normalizeAuctionUrl(rawUrl);
 
-  return deduped;
-}
-
-function extractSearchPages(md) {
-  const pages = [];
-  const seen = new Set();
-
-  const regex = /(?<!!)\[[^\]]*\]\(([^)]+)\)/g;
-  let match;
-
-  while ((match = regex.exec(md)) !== null) {
-    const url = normalizeSearchUrl(match[1]);
     if (!url) continue;
-    if (seen.has(url)) continue;
-    seen.add(url);
-    pages.push(url);
+
+    const id = url.split('/').pop().split('?')[0];
+    if (!id || seen.has(id)) continue;
+
+    const titleMatch = block.match(/\*\*([^*]+)\*\*/);
+    const title = titleMatch ? titleMatch[1].replace(/\\\|/g, '|').trim() : null;
+
+    const remainingText = parseRemainingText(block);
+    const endDate = parseRemainingToDate(remainingText);
+    const endTime = endDate ? formatDateTime(endDate) : null;
+    const currentBid = extractPrice(block);
+
+    items.push({
+      id,
+      title: title || `Tesla oglas ${id}`,
+      url,
+      endTime,
+      currentBid: currentBid || 'N/A'
+    });
+
+    seen.add(id);
   }
 
-  return pages;
+  console.log(`Pronađeno ${items.length} oglasa.`);
+  return items;
 }
 
-async function scrapeAllSearchPages() {
-  const queue = [config.SEARCH_URL];
-  const visited = new Set();
-  const allItems = [];
-  const seenAuctionIds = new Set();
-
-  while (queue.length > 0 && visited.size < MAX_SEARCH_PAGES) {
-    const url = queue.shift();
-    if (!url || visited.has(url)) continue;
-
-    visited.add(url);
-    console.log(`Obrada search stranice ${visited.size}/${MAX_SEARCH_PAGES}: ${url}`);
-
-    const md = await scrapePage(url);
-    if (!md) continue;
-
-    const items = parseAuctions(md);
-    console.log(`Na stranici pronađeno oglasa: ${items.length}`);
-
-    for (const item of items) {
-      if (!item.id || seenAuctionIds.has(item.id)) continue;
-      seenAuctionIds.add(item.id);
-      allItems.push(item);
-    }
-
-    const searchPages = extractSearchPages(md);
-    for (const page of searchPages) {
-      if (!visited.has(page) && !queue.includes(page) && queue.length + visited.size < MAX_SEARCH_PAGES) {
-        queue.push(page);
-      }
-    }
-  }
-
-  console.log(`Ukupno jedinstvenih oglasa: ${allItems.length}`);
-  return allItems;
-}
-
-function parseNorwegianDate(str) {
+function parseLocalDateTime(str) {
   if (!str) return null;
 
-  const m = str.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})[^\d]*(\d{2}):(\d{2})/);
+  const m = str.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
   if (!m) return null;
 
   return new Date(
-    `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}T${m[4]}:${m[5]}:00`
+    Number(m[3]),
+    Number(m[2]) - 1,
+    Number(m[1]),
+    Number(m[4]),
+    Number(m[5]),
+    0
   );
 }
 
@@ -286,8 +248,13 @@ async function run() {
   const now = new Date();
   const today = todayKey(now);
 
-  const items = await scrapeAllSearchPages();
+  const md = await scrapePage(config.SEARCH_URL);
+  if (!md) {
+    console.log('Nema markdown sadržaja.');
+    return;
+  }
 
+  const items = parseAuctions(md);
   if (!items.length) {
     console.log('Nema pronađenih oglasa.');
     return;
@@ -313,7 +280,7 @@ async function run() {
       db[item.id].notifiedNew = true;
     }
 
-    const endDate = parseNorwegianDate(db[item.id].endTime);
+    const endDate = parseLocalDateTime(db[item.id].endTime);
     if (
       endDate &&
       isSameLocalDay(endDate, now) &&
