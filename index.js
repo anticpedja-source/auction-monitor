@@ -337,8 +337,4 @@ async function run() {
 
 ensureDir();
 
-cron.schedule('0 8,14,20 * * *', run, {
-  timezone: 'Europe/Belgrade'
-});
-
 run();
