@@ -9,11 +9,11 @@ module.exports = {
 
   // --- Firecrawl API ključ ---
   // Dobijen na firecrawl.dev/dashboard
-  FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY || 'OVDE_UPISI_FIRECRAWL_KLJUC',
+  FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
 
   // --- Telegram ---
-  TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN || 'OVDE_UPISI_TELEGRAM_TOKEN',
-  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || 'OVDE_UPISI_CHAT_ID',
+  TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
+  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
 
   // --- Obaveštenja ---
   // Koliko sati pre isteka aukcije da pošalje upozorenje
