@@ -60,6 +60,23 @@ async function scrapePage(url) {
     );
 
     const md = res.data?.data?.markdown || '';
+
+    console.log(`Scrape OK: ${url} | dužina markdown-a: ${md.length}`);
+
+    // 👇 OVO JE KLJUČNO
+    console.log('--- MARKDOWN PREVIEW START ---');
+    console.log(md.slice(0, 4000));
+    console.log('--- MARKDOWN PREVIEW END ---');
+
+    return md;
+
+  } catch (e) {
+    console.error(`Firecrawl greška za ${url}:`, e.response?.data || e.message);
+    return '';
+  }
+}
+
+    const md = res.data?.data?.markdown || '';
     console.log(`Scrape OK: ${url} | dužina markdown-a: ${md.length}`);
     return md;
   } catch (e) {
