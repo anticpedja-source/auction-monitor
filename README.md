@@ -25,3 +25,6 @@ Environment varijable se podešavaju u Railway dashboard-u:
 - `FIRECRAWL_API_KEY`
 - `TELEGRAM_TOKEN`
 - `TELEGRAM_CHAT_ID`
+
+Napomena:
+- Preporuka je da se servis na Railway-u podigne kao worker/background service.
