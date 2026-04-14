@@ -8,6 +8,9 @@ const DB_FILE = path.join(config.DATA_DIR, 'auctions.json');
 const SITE_ORIGIN = 'https://www.auksjonen.no';
 const MAX_AUCTIONS_PER_MESSAGE = 6;
 
+// 🔧 kurs NOK -> EUR
+const NOK_TO_EUR = 1 / 11.5;
+
 function ensureDir() {
   if (!fs.existsSync(config.DATA_DIR)) {
     fs.mkdirSync(config.DATA_DIR, { recursive: true });
@@ -62,7 +65,7 @@ async function scrapePage(url) {
     console.log(`Scrape OK: ${url} | dužina markdown-a: ${md.length}`);
     return md;
   } catch (e) {
-    console.error(`Firecrawl greška za ${url}:`, e.response?.data || e.message);
+    console.error(`Firecrawl greška:`, e.response?.data || e.message);
     return '';
   }
 }
@@ -86,10 +89,7 @@ function normalizeAuctionUrl(url) {
 function parseRemainingText(block) {
   const m = block.match(/((?:\d+\s*d\s*)?(?:\d+\s*t\s*)?(?:\d+\s*min\s*)?(?:\d+\s*sek\s*)?)\s*Gjenstår/i);
   if (!m) return null;
-
-  return m[1]
-    .replace(/\s+/g, ' ')
-    .trim();
+  return m[1].replace(/\s+/g, ' ').trim();
 }
 
 function parseRemainingToDate(remainingText, now = new Date()) {
@@ -121,19 +121,34 @@ function formatDateTime(date) {
   return `${dd}.${mm}.${yyyy} ${hh}:${mi}`;
 }
 
+// 🔧 parsiranje cene
 function extractPrice(block) {
   if (/Ingen bud/i.test(block)) {
-    return 'Ingen bud';
+    return { nok: null, text: 'Ingen bud' };
   }
 
-  const priceMatches = [...block.matchAll(/(\d[\d\s.]*)\s*,-\s*(?:Høyeste bud|Bud)/gi)];
-  if (!priceMatches.length) return null;
+  const match = block.match(/(\d[\d\s.]*)\s*,-/);
+  if (!match) return { nok: null, text: null };
 
-  const raw = priceMatches[0][1]
-    .replace(/\s+/g, ' ')
-    .trim();
+  const clean = match[1].replace(/\s+/g, '');
+  const nokValue = Number(clean);
 
-  return `${raw},-`;
+  return {
+    nok: nokValue,
+    text: match[0]
+  };
+}
+
+// 🔧 konverzija u EUR
+function formatPrice(nokValue, originalText) {
+  if (!nokValue) return originalText || 'N/A';
+
+  const eur = Math.round(nokValue * NOK_TO_EUR);
+
+  const formattedNok = nokValue.toLocaleString('sr-RS');
+  const formattedEur = eur.toLocaleString('sr-RS');
+
+  return `${formattedNok} NOK (~${formattedEur} €)`;
 }
 
 function parseAuctions(md) {
@@ -161,14 +176,16 @@ function parseAuctions(md) {
     const remainingText = parseRemainingText(block);
     const endDate = parseRemainingToDate(remainingText);
     const endTime = endDate ? formatDateTime(endDate) : null;
-    const currentBid = extractPrice(block);
+
+    const priceObj = extractPrice(block);
+    const currentBid = formatPrice(priceObj.nok, priceObj.text);
 
     items.push({
       id,
       title: title || `Tesla oglas ${id}`,
       url,
       endTime,
-      currentBid: currentBid || 'N/A'
+      currentBid
     });
 
     seen.add(id);
@@ -249,16 +266,10 @@ async function run() {
   const today = todayKey(now);
 
   const md = await scrapePage(config.SEARCH_URL);
-  if (!md) {
-    console.log('Nema markdown sadržaja.');
-    return;
-  }
+  if (!md) return;
 
   const items = parseAuctions(md);
-  if (!items.length) {
-    console.log('Nema pronađenih oglasa.');
-    return;
-  }
+  if (!items.length) return;
 
   const newItems = [];
   const endingToday = [];
@@ -298,11 +309,6 @@ async function run() {
     ...buildSectionMessages('Ističu danas', endingToday)
   ];
 
-  if (!messages.length) {
-    console.log('Nema novih oglasa niti novih unosa za "Ističu danas".');
-    return;
-  }
-
   for (const message of messages) {
     await sendTelegram(message);
   }
@@ -310,7 +316,7 @@ async function run() {
 
 ensureDir();
 
-cron.schedule('0 8,14,20 * * *', run, {
+cron.schedule('0 8,15,22 * * *', run, {
   timezone: 'Europe/Belgrade'
 });
 
